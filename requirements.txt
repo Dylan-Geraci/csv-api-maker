@@ -1,0 +1,5 @@
+fastapi
+uvicorn[standard]
+python-multipart   # for file uploads (coming next)
+pandas            # for schema/type sniffing (soon)
+SQLAlchemy        # for SQLite persistence (soon)
