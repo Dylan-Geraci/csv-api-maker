@@ -1,4 +1,5 @@
 from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from app.db import Base, engine, get_db
 from app.models import Dataset
@@ -86,3 +87,31 @@ def list_datasets(db: Session = Depends(get_db)):
         {"name": ds.name, "rows": ds.row_count, "created_at": ds.created_at}
         for ds in db.query(Dataset).order_by(Dataset.created_at.desc()).all()
     ]
+
+
+def _get_dataset_or_404(db: Session, name: str) -> Dataset:
+    ds = db.query(Dataset).filter_by(name=name).first()
+    if not ds:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    return ds
+
+
+@app.get("/datasets/{name}")
+def get_dataset(name: str, db: Session = Depends(get_db)):
+    ds = _get_dataset_or_404(db, name)
+    schema = json.loads(ds.schema_json)
+    with engine.connect() as conn:
+        rows = [dict(r._mapping) for r in conn.execute(
+            text(f"SELECT * FROM {ds.table_name} LIMIT :n"), {"n": 5}
+        ).fetchall()]
+    return {"name": ds.name, "rows": ds.row_count, "schema": schema, "sample": rows}
+
+
+@app.delete("/datasets/{name}")
+def delete_dataset(name: str, db: Session = Depends(get_db)):
+    ds = _get_dataset_or_404(db, name)
+    with engine.begin() as conn:
+        conn.execute(text(f"DROP TABLE IF EXISTS {ds.table_name}"))
+    db.delete(ds)
+    db.commit()
+    return {"message": f"Deleted dataset '{name}'."}
