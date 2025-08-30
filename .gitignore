@@ -11,3 +11,6 @@ env/
 
 # Testing
 /samples
+
+# Runtime Data
+data/
