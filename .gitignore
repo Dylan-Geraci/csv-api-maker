@@ -8,3 +8,6 @@ env/
 
 # OS / tools
 .DS_Store
+
+# Testing
+/samples
