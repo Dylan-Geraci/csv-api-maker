@@ -14,5 +14,4 @@ env/
 
 # Runtime Data
 data/
-data/*
-/data
+samples/

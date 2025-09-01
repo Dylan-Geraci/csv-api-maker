@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, Depends, HTTPException, Query
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from app.db import Base, engine, get_db
@@ -115,3 +115,107 @@ def delete_dataset(name: str, db: Session = Depends(get_db)):
     db.delete(ds)
     db.commit()
     return {"message": f"Deleted dataset '{name}'."}
+
+
+@app.get("/datasets/{name}/rows")
+def get_rows(
+        name: str,
+        limit: int = 50,
+        offset: int = 0,
+        sort: str | None = None,
+        filter: list[str] | None = Query(None),
+        db: Session = Depends(get_db),):
+
+    ds = _get_dataset_or_404(db, name)
+    schema = json.loads(ds.schema_json)
+    cols = {col["name"]: col["type"] for col in schema}
+
+    # clamp limit
+    limit = max(1, min(limit, 1000))
+    if offset < 0:
+        raise HTTPException(status_code=400, detail="offset must be >= 0")
+
+    # helpers
+    def parse_value(col: str, raw: str):
+        t = cols[col]
+        if t == "integer":
+            return int(raw)
+        if t == "float":
+            return float(raw)
+        if t == "boolean":
+            return 1 if str(raw).lower() in ("1", "true", "t", "yes", "y") else 0
+        if t == "datetime":
+            return str(pd.to_datetime(raw))
+        return raw
+
+    # filters
+    where_clauses = []
+    params: dict[str, object] = {"limit": limit, "offset": offset}
+
+    if filter:
+        for i, f in enumerate(filter):
+            parts = f.split(":", 2)
+            if len(parts) != 3:
+                raise HTTPException(
+                    status_code=400, detail="Bad filter format. Use col:op:value")
+            col, op, raw = parts
+            if col not in cols:
+                raise HTTPException(
+                    status_code=400, detail=f"Unknown column '{col}'")
+            key = f"v{i}"
+
+            if op == "eq":
+                where_clauses.append(f'"{col}" = :{key}')
+                params[key] = parse_value(col, raw)
+            elif op in ("neq", "ne"):
+                where_clauses.append(f'"{col}" <> :{key}')
+                params[key] = parse_value(col, raw)
+            elif op == "gt":
+                where_clauses.append(f'"{col}" > :{key}')
+                params[key] = parse_value(col, raw)
+            elif op == "gte":
+                where_clauses.append(f'"{col}" >= :{key}')
+                params[key] = parse_value(col, raw)
+            elif op == "lt":
+                where_clauses.append(f'"{col}" < :{key}')
+                params[key] = parse_value(col, raw)
+            elif op == "lte":
+                where_clauses.append(f'"{col}" <= :{key}')
+                params[key] = parse_value(col, raw)
+            elif op == "contains":
+                where_clauses.append(f'"{col}" LIKE :{key}')
+                params[key] = f"%{raw}%"
+            else:
+                raise HTTPException(
+                    status_code=400, detail=f"Unsupported operator '{op}'")
+
+    where_sql = (" WHERE " + " AND ".join(where_clauses)
+                 ) if where_clauses else ""
+
+    # sorting
+    order_sql = ""
+    if sort:
+        try:
+            scol, sdir = sort.split(":", 1)
+        except ValueError:
+            scol, sdir = sort, "asc"
+        if scol not in cols:
+            raise HTTPException(
+                status_code=400, detail=f"Unknown sort column '{scol}'")
+        sdir = sdir.lower()
+        sdir = "desc" if sdir == "desc" else "asc"
+        order_sql = f' ORDER BY "{scol}" {sdir.upper()}'
+
+    # query
+    with engine.connect() as conn:
+        sql = text(
+            f'SELECT * FROM {ds.table_name}{where_sql}{order_sql} LIMIT :limit OFFSET :offset')
+        rows = [dict(r._mapping) for r in conn.execute(sql, params).fetchall()]
+
+        total_params = {k: v for k,
+                        v in params.items() if k not in ("limit", "offset")}
+        total_sql = text(
+            f'SELECT COUNT(*) AS c FROM {ds.table_name}{where_sql}')
+        total = conn.execute(total_sql, total_params).scalar_one()
+
+    return {"data": rows, "meta": {"limit": limit, "offset": offset, "total": int(total)}}
